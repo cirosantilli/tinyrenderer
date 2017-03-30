@@ -6,13 +6,17 @@
 #include "geometry.h"
 #include "our_gl.h"
 
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+
 Model *model        = NULL;
 
 const int width  = 800;
 const int height = 800;
 
-Vec3f light_dir(1,1,1);
-Vec3f       eye(1,1,3);
+Vec3f light_dir0(1,1,1);
+Vec3f light_dir;
+Vec3f       eye(0,0,3);
 Vec3f    center(0,0,0);
 Vec3f        up(0,1,0);
 
@@ -59,23 +63,69 @@ struct Shader : public IShader {
     }
 };
 
+double common_get_secs(void) {
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return ts.tv_sec + (1e-9 * ts.tv_nsec);
+}
+
+const double COMMON_FPS_GRANULARITY_S = 0.5;
+double common_fps_last_time_s;
+unsigned int common_fps_nframes;
+
+void common_fps_init() {
+    common_fps_nframes = 0;
+    common_fps_last_time_s = common_get_secs();
+}
+
+void common_fps_update_and_print() {
+    double dt, current_time_s;
+    current_time_s = common_get_secs();
+    common_fps_nframes++;
+    dt = current_time_s - common_fps_last_time_s;
+    if (dt > COMMON_FPS_GRANULARITY_S) {
+        printf("FPS = %f\n", common_fps_nframes / dt);
+        common_fps_last_time_s = current_time_s;
+        common_fps_nframes = 0;
+    }
+}
+
 int main(int argc, char** argv) {
     if (2>argc) {
         std::cerr << "Usage: " << argv[0] << " obj/model.obj" << std::endl;
         return 1;
     }
 
+    /* SDL init. */
+    SDL_Event event;
+    SDL_Renderer *renderer = NULL;
+    SDL_Texture *texture = NULL;
+    SDL_Window *window = NULL;
+    SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO);
+    SDL_CreateWindowAndRenderer(
+        width, height,
+        0, &window, &renderer
+    );
+    IMG_Init(0);
+    common_fps_init();
+
+    int pitch;
+    void *pixels = NULL;
+    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+        SDL_TEXTUREACCESS_STREAMING, width, height);
+
     float *zbuffer = new float[width*height];
-    for (int i=width*height; i--; zbuffer[i] = -std::numeric_limits<float>::max());
-
-    TGAImage frame(width, height, TGAImage::RGB);
-    lookat(eye, center, up);
     viewport(width/8, height/8, width*3/4, height*3/4);
-    projection(-1.f/(eye-center).norm());
-    light_dir = proj<3>((Projection*ModelView*embed<4>(light_dir, 0.f))).normalize();
-
-    for (int m=1; m<argc; m++) {
-        model = new Model(argv[m]);
+    model = new Model(argv[1]);
+    float angle = 0.1;
+    while (1) {
+        lookat(eye, center, up);
+        projection(-1.f/(eye-center).norm());
+        light_dir = proj<3>((Projection*ModelView*embed<4>(light_dir0, 0.f))).normalize();
+        for (int i=width*height; i--; zbuffer[i] = -std::numeric_limits<float>::max());
+        TGAImage frame(width, height, TGAImage::RGBA);
+        // TODO: if this is done, it crashes. Why?
+        //SDL_LockTexture(texture, NULL, (void**)&frame.data, &pitch);
         Shader shader;
         for (int i=0; i<model->nfaces(); i++) {
             for (int j=0; j<3; j++) {
@@ -83,10 +133,36 @@ int main(int argc, char** argv) {
             }
             triangle(shader.varying_tri, shader, frame, zbuffer);
         }
-        delete model;
+        frame.flip_vertically();
+
+        //frame.write_tga_file("framebuffer.tga");
+        //texture = IMG_LoadTexture(renderer, "framebuffer.tga");
+        //SDL_RenderCopy(renderer, texture, NULL, NULL);
+        //SDL_RenderPresent(renderer);
+        //SDL_DestroyTexture(texture);
+
+        SDL_LockTexture(texture, NULL, &pixels, &pitch);
+        memcpy(pixels, frame.buffer(), width * height * 4);
+        SDL_UnlockTexture(texture);
+        SDL_RenderCopy(renderer, texture, NULL, NULL);
+        SDL_RenderPresent(renderer);
+
+        Vec3f oldEye = eye;
+        eye[0] = cos(angle) * oldEye[0] + -sin(angle) * oldEye[2];
+        eye[2] = sin(angle) * oldEye[0] +  cos(angle) * oldEye[2];
+        oldEye = eye;
+
+        common_fps_update_and_print();
+        if (SDL_PollEvent(&event) && event.type == SDL_QUIT)
+            break;
     }
-    frame.flip_vertically(); // to place the origin in the bottom left corner of the image
-    frame.write_tga_file("framebuffer.tga");
+    delete model;
+
+    /* SDL deinit. */
+    IMG_Quit();
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
 
     delete [] zbuffer;
     return 0;
